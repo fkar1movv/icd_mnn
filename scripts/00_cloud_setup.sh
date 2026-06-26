@@ -4,7 +4,13 @@ set -Eeuo pipefail
 # ============================================================
 # 00_cloud_setup.sh
 # Cloud setup for ICD/MKB → INN/MNN extraction pipeline
-# Target: Ubuntu/Linux + RTX 5090 32GB + PyTorch CUDA container
+#
+# New extraction stack:
+#   PDF      → Docling + SuryaOCR
+#   DOC/DOCX → native Python extractors + Docling fallback later
+#
+# Target:
+#   Vast.ai Ubuntu/Linux + NVIDIA GPU + PyTorch CUDA container
 # ============================================================
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,6 +47,7 @@ if command -v apt-get >/dev/null 2>&1; then
       curl \
       wget \
       unzip \
+      zip \
       rsync \
       jq \
       dos2unix \
@@ -52,6 +59,8 @@ if command -v apt-get >/dev/null 2>&1; then
       python-is-python3 \
       fonts-dejavu \
       fonts-liberation \
+      fonts-noto-core \
+      fonts-noto-cjk \
       fontconfig \
       libgl1 \
       libglib2.0-0 \
@@ -74,11 +83,11 @@ mkdir -p \
   data/outputs \
   data/failed \
   data/parsed_word \
-  data/parsed_ocr \
+  data/parsed_docling \
   data/converted \
   data/ocr_queue \
-  data/llm_cleaned \
   data/logs \
+  data/export \
   models \
   tmp \
   src \
@@ -95,28 +104,43 @@ RAW_GUIDELINES_DIR=data/raw_guidelines
 OUTPUT_DIR=data/outputs
 FAILED_DIR=data/failed
 PARSED_WORD_DIR=data/parsed_word
-PARSED_OCR_DIR=data/parsed_ocr
+PARSED_DOCLING_DIR=data/parsed_docling
+PARSED_OCR_DIR=data/parsed_docling
 CONVERTED_DIR=data/converted
 OCR_QUEUE_DIR=data/ocr_queue
-LLM_CLEANED_DIR=data/llm_cleaned
 LOG_DIR=data/logs
 
 LIBREOFFICE_CMD=soffice
 
 CUDA_VISIBLE_DEVICES=0
-GPU_MEMORY_UTILIZATION=0.92
-MAX_NUM_BATCHED_TOKENS=32768
-OCR_BATCH_SIZE=1
-OCR_MAX_PAGES_PER_DOC=0
-OCR_DPI=200
 
-PADDLEOCR_VL_MODEL=PaddlePaddle/PaddleOCR-VL
-PADDLEOCR_VL_SERVED_MODEL_NAME=PaddleOCR-VL-0.9B
-PADDLEOCR_VL_PORT=8118
+# Docling + SuryaOCR
+OCR_ENGINE=docling_surya
+DOCLING_OCR_LANGS=uz,ru,en
+DOCLING_FORCE_FULL_PAGE_OCR=true
+DOCLING_DO_TABLE_STRUCTURE=false
+DOCLING_GENERATE_PAGE_IMAGES=false
+DOCLING_GENERATE_PICTURE_IMAGES=false
+DOCLING_IMAGES_SCALE=1.0
+DOCLING_NUM_THREADS=1
+OMP_NUM_THREADS=1
 
-GEMMA_API_URL=
-GEMMA_API_KEY=
-USE_LLM_CLEANUP=false
+# Surya runtime
+# On NVIDIA GPU, Surya 2 can use vLLM.
+# If vLLM is unavailable, extraction script should fail gracefully and log the error.
+SURYA_INFERENCE_BACKEND=vllm
+SURYA_INFERENCE_KEEP_ALIVE=1
+SURYA_INFERENCE_PARALLEL=1
+
+# Memory-safety defaults
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+TOKENIZERS_PARALLELISM=false
+NVIDIA_TF32_OVERRIDE=1
+TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
+
+# vLLM install is attempted by default.
+# Set INSTALL_VLLM=0 before running setup to skip it.
+INSTALL_VLLM=1
 ENV_FILE
 
 echo "Created .env"
@@ -134,7 +158,7 @@ source .venv_core/bin/activate
 
 python -m pip install --upgrade pip setuptools wheel
 
-python -m pip install \
+python -m pip install --no-cache-dir \
   mammoth \
   python-docx \
   docx2python \
@@ -149,7 +173,8 @@ python -m pip install \
   httpx \
   tenacity \
   orjson \
-  regex
+  regex \
+  docling
 
 python - <<'PY_CHECK_CORE'
 import sys
@@ -158,7 +183,9 @@ import docx
 import fitz
 import pandas
 import dotenv
+import docling
 from docx2python import docx2python
+
 print("CORE ENV OK")
 print("Python:", sys.version)
 PY_CHECK_CORE
@@ -175,14 +202,14 @@ echo "========== OCR ENV =========="
 rm -rf .venv_ocr
 
 # Keep system CUDA/Torch visible from Vast.ai PyTorch container.
+# Important: do NOT use --ignore-installed here, otherwise pip may replace
+# the container's working CUDA torch stack.
 python3 -m venv --system-site-packages .venv_ocr
 source .venv_ocr/bin/activate
 
-# DO NOT upgrade pip/setuptools/wheel here.
-# In many CUDA containers, system wheel is Debian-managed and pip upgrade causes:
-# "Cannot uninstall wheel ... RECORD file not found."
+python -m pip install --upgrade pip setuptools wheel
 
-python -m pip install --ignore-installed --no-cache-dir \
+python -m pip install --no-cache-dir \
   pillow \
   pymupdf \
   pandas \
@@ -194,42 +221,37 @@ python -m pip install --ignore-installed --no-cache-dir \
   regex \
   beautifulsoup4 \
   lxml \
-  ftfy
+  ftfy \
+  docling \
+  docling-surya \
+  surya-ocr
 
-echo ""
-echo "Installing PaddleOCR package..."
-python -m pip install --ignore-installed --no-cache-dir "paddleocr[doc-parser]" || {
-  echo "WARNING: paddleocr[doc-parser] install failed."
-  echo "Continuing setup; OCR install can be patched separately."
-}
+# vLLM is useful for Surya 2 on NVIDIA GPU, but it is the most fragile dependency.
+# Keep setup non-blocking: if vLLM fails, the extraction script will still log clear failures.
+INSTALL_VLLM="${INSTALL_VLLM:-1}"
 
-echo ""
-echo "Installing PaddlePaddle GPU runtime..."
-python -m pip install --ignore-installed --no-cache-dir paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/stable/cu126/ || {
-  echo "WARNING: paddlepaddle-gpu cu126 install failed."
-  echo "Trying default PyPI..."
-  python -m pip install --ignore-installed --no-cache-dir paddlepaddle-gpu || {
-    echo "WARNING: paddlepaddle-gpu install failed."
-    echo "Continuing setup; OCR runtime can be patched separately."
-  }
-}
-
-# vLLM is optional. Default OFF to avoid breaking setup.
-# Enable later with: INSTALL_VLLM=1 bash scripts/00_cloud_setup.sh
-if [ "${INSTALL_VLLM:-0}" = "1" ]; then
+if [ "$INSTALL_VLLM" = "1" ]; then
   echo ""
-  echo "Installing vLLM nightly..."
-  python -m pip install --no-cache-dir --pre vllm \
-    --extra-index-url https://wheels.vllm.ai/nightly \
-    --extra-index-url https://download.pytorch.org/whl/cu129 || {
-      echo "WARNING: vLLM install failed. Continuing without vLLM."
-    }
+  echo "Installing vLLM..."
+
+  python -m pip install --no-cache-dir vllm || {
+    echo "WARNING: vLLM install failed with default PyPI."
+    echo "Trying vLLM nightly wheels..."
+
+    python -m pip install --no-cache-dir --pre vllm \
+      --extra-index-url https://wheels.vllm.ai/nightly \
+      --extra-index-url https://download.pytorch.org/whl/cu129 || {
+        echo "WARNING: vLLM install failed. Continuing without vLLM."
+      }
+  }
 else
-  echo "Skipping vLLM install. Set INSTALL_VLLM=1 to enable."
+  echo "Skipping vLLM install because INSTALL_VLLM=0."
 fi
 
 python - <<'PY_CHECK_OCR'
 import sys
+import importlib.util
+
 print("OCR ENV CHECK")
 print("Python:", sys.version)
 
@@ -244,28 +266,30 @@ except Exception as e:
     print("Torch check failed:", repr(e))
 
 try:
-    import paddle
-    print("Paddle:", paddle.__version__)
-    print("Paddle compiled with CUDA:", paddle.device.is_compiled_with_cuda())
-    try:
-        paddle.device.set_device("gpu:0")
-        print("Paddle device:", paddle.device.get_device())
-    except Exception as e:
-        print("Paddle GPU device set failed:", repr(e))
+    import docling
+    print("Docling import OK")
 except Exception as e:
-    print("Paddle import failed:", repr(e))
+    print("Docling import failed:", repr(e))
 
 try:
-    import paddleocr
-    print("PaddleOCR import OK")
+    from docling_surya import SuryaOcrOptions
+    print("docling-surya import OK")
 except Exception as e:
-    print("PaddleOCR import failed:", repr(e))
+    print("docling-surya import failed:", repr(e))
+
+try:
+    import surya
+    print("surya import OK")
+except Exception as e:
+    print("surya import failed:", repr(e))
 
 try:
     import vllm
     print("vLLM:", vllm.__version__)
 except Exception as e:
     print("vLLM import skipped/failed:", repr(e))
+
+print("vLLM available:", importlib.util.find_spec("vllm") is not None)
 PY_CHECK_OCR
 
 deactivate
@@ -276,6 +300,7 @@ deactivate
 
 echo ""
 echo "========== GPU CHECK =========="
+
 if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi
 else
@@ -302,17 +327,23 @@ source .env
 set +a
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export TOKENIZERS_PARALLELISM=false
 
-# Paddle memory/performance flags
-export FLAGS_fraction_of_gpu_memory_to_use=${GPU_MEMORY_UTILIZATION:-0.92}
-export FLAGS_allocator_strategy=auto_growth
-export FLAGS_cudnn_exhaustive_search=1
+# Memory safety
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 
-# Torch TF32 speed flags
-export NVIDIA_TF32_OVERRIDE=1
-export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
+# Docling / native preprocessing stability
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+export DOCLING_NUM_THREADS=${DOCLING_NUM_THREADS:-1}
+
+# Surya runtime
+export SURYA_INFERENCE_BACKEND=${SURYA_INFERENCE_BACKEND:-vllm}
+export SURYA_INFERENCE_KEEP_ALIVE=${SURYA_INFERENCE_KEEP_ALIVE:-1}
+export SURYA_INFERENCE_PARALLEL=${SURYA_INFERENCE_PARALLEL:-1}
+
+# Torch speed flags
+export NVIDIA_TF32_OVERRIDE=${NVIDIA_TF32_OVERRIDE:-1}
+export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=${TORCH_ALLOW_TF32_CUBLAS_OVERRIDE:-1}
 ACT_OCR
 
 chmod +x activate_core.sh activate_ocr.sh
@@ -346,10 +377,14 @@ deactivate
 echo ""
 echo "SETUP DONE"
 echo ""
-echo "Next:"
+echo "Next commands:"
 echo "  source activate_core.sh"
 echo "  python scripts/10_build_registry.py"
 echo ""
-echo "OCR:"
+echo "Word extraction:"
+echo "  source activate_core.sh"
+echo "  python scripts/20_extract_word.py"
+echo ""
+echo "PDF extraction with Docling + SuryaOCR:"
 echo "  source activate_ocr.sh"
-echo "  python scripts/40_run_paddleocr_vl.py"
+echo "  python scripts/40_run_docling_surya.py"
