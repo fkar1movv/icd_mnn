@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:
     pass
@@ -30,8 +31,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RAW_GUIDELINES_DIR = Path(os.getenv("RAW_GUIDELINES_DIR", "data/raw_guidelines"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "data/outputs"))
 FAILED_DIR = Path(os.getenv("FAILED_DIR", "data/failed"))
+
 PARSED_WORD_DIR = Path(os.getenv("PARSED_WORD_DIR", "data/parsed_word"))
-PARSED_OCR_DIR = Path(os.getenv("PARSED_OCR_DIR", "data/parsed_ocr"))
+
+# New Docling + Surya output directory.
+# PARSED_OCR_DIR is kept as a compatibility alias because older merge scripts
+# still import PARSED_OCR_DIR.
+PARSED_DOCLING_DIR = Path(os.getenv("PARSED_DOCLING_DIR", "data/parsed_docling"))
+PARSED_OCR_DIR = Path(os.getenv("PARSED_OCR_DIR", str(PARSED_DOCLING_DIR)))
+
 CONVERTED_DIR = Path(os.getenv("CONVERTED_DIR", "data/converted"))
 OCR_QUEUE_DIR = Path(os.getenv("OCR_QUEUE_DIR", "data/ocr_queue"))
 LLM_CLEANED_DIR = Path(os.getenv("LLM_CLEANED_DIR", "data/llm_cleaned"))
@@ -54,6 +62,7 @@ def ensure_base_dirs() -> None:
         OUTPUT_DIR,
         FAILED_DIR,
         PARSED_WORD_DIR,
+        PARSED_DOCLING_DIR,
         PARSED_OCR_DIR,
         CONVERTED_DIR,
         OCR_QUEUE_DIR,
@@ -74,7 +83,10 @@ def read_json(path: Path) -> Any:
 def write_json(path: Path, data: Any, indent: int = 2) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=indent), encoding="utf-8")
+    tmp.write_text(
+        json.dumps(data, ensure_ascii=False, indent=indent),
+        encoding="utf-8",
+    )
     tmp.replace(path)
 
 
@@ -119,22 +131,29 @@ def append_jsonl(path: Path, row: Dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def write_csv(path: Path, rows: List[Dict[str, Any]], fieldnames: Optional[List[str]] = None) -> None:
+def write_csv(
+    path: Path,
+    rows: List[Dict[str, Any]],
+    fieldnames: Optional[List[str]] = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if fieldnames is None:
         keys = []
         seen = set()
+
         for row in rows:
             for k in row.keys():
                 if k not in seen:
                     keys.append(k)
                     seen.add(k)
+
         fieldnames = keys
 
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
+
         for row in rows:
             writer.writerow({k: row.get(k) for k in fieldnames})
 
@@ -158,10 +177,21 @@ def clean_text(text: str) -> str:
     text = text.replace("\ufeff", "")
 
     # Common broken Word references/bookmarks.
-    text = re.sub(r"Ошибка!\s*Закладка\s*не\s*опред[^\n]*", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"Error!\s*Bookmark\s*not\s*defined[^\n]*", " ", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"Ошибка!\s*Закладка\s*не\s*опред[^\n]*",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"Error!\s*Bookmark\s*not\s*defined[^\n]*",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
 
     # Normalize line endings and whitespace.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n[ \t]+", "\n", text)
     text = re.sub(r"\n{4,}", "\n\n\n", text)
@@ -169,37 +199,56 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-
 def detect_language_from_text(text: str) -> str:
     sample = clean_text(text[:12000]).lower()
-
 
     if len(sample) < 50:
         return "unknown"
 
-
     uz_lat_markers = [
-        "o‘zbekiston", "o'zbekiston",
-        "sog‘liq", "sog'liq",
-
-        "bo‘yicha", "bo'yicha",
-        "davolash", "kasallik", "shifokor",
-        "tibbiy", "toshkent", "vazirligi",
-        "tashxis", "profilaktika", "bemor",
+        "o‘zbekiston",
+        "o'zbekiston",
+        "sog‘liq",
+        "sog'liq",
+        "bo‘yicha",
+        "bo'yicha",
+        "davolash",
+        "kasallik",
+        "shifokor",
+        "tibbiy",
+        "toshkent",
+        "vazirligi",
+        "tashxis",
+        "profilaktika",
+        "bemor",
     ]
 
-
     ru_markers = [
-        "министерство", "здравоохранения", "республики",
-        "клинический", "протокол", "стандарт",
-        "лечение", "диагностика", "заболевание",
-        "беременность", "пациент", "профилактика",
+        "министерство",
+        "здравоохранения",
+        "республики",
+        "клинический",
+        "протокол",
+        "стандарт",
+        "лечение",
+        "диагностика",
+        "заболевание",
+        "беременность",
+        "пациент",
+        "профилактика",
     ]
 
     uz_cyr_markers = [
-        "соғлиқ", "сақлаш", "бўйича", "даволаш",
-        "касаллик", "шифокор", "тиббий", "ташхис",
-        "бемор", "вазирлиги",
+        "соғлиқ",
+        "сақлаш",
+        "бўйича",
+        "даволаш",
+        "касаллик",
+        "шифокор",
+        "тиббий",
+        "ташхис",
+        "бемор",
+        "вазирлиги",
     ]
 
     uz_cyr_chars = len(re.findall(r"[қўғҳ]", sample, flags=re.IGNORECASE))
@@ -232,18 +281,43 @@ def detect_language_from_path(path: str) -> str:
     filename = p.split("/")[-1]
 
     ru_markers = [
-        " рус", "_рус", "-рус", "рус.", "русс", "русча",
-        " russian", "_ru", "-ru", " ru.",
+        " рус",
+        "_рус",
+        "-рус",
+        "рус.",
+        "русс",
+        "русча",
+        " russian",
+        "_ru",
+        "-ru",
+        " ru.",
     ]
 
     uz_lat_markers = [
-        " лат", "_лат", "-лат", "латин", "лотин", "лот",
-        " latin", "_lat", "-lat", "uzb latin", "uzbek latin",
+        " лат",
+        "_лат",
+        "-лат",
+        "латин",
+        "лотин",
+        "лот",
+        " latin",
+        "_lat",
+        "-lat",
+        "uzb latin",
+        "uzbek latin",
     ]
 
     uz_cyr_markers = [
-        " кир", "_кир", "-кир", "кирил", "кирилл",
-        " cyr", "_cyr", "-cyr", "uzb kir", "uzbek cyr",
+        " кир",
+        "_кир",
+        "-кир",
+        "кирил",
+        "кирилл",
+        " cyr",
+        "_cyr",
+        "-cyr",
+        "uzb kir",
+        "uzbek cyr",
         "узб кир",
     ]
 
@@ -291,6 +365,7 @@ def get_quality_flags(text: str, detected_language: str) -> List[str]:
     if text:
         letters = len(re.findall(r"[A-Za-zА-Яа-яЁёҚқЎўҒғҲҳ]", text))
         ratio = letters / max(len(text), 1)
+
         if ratio < 0.25 and char_count > 500:
             flags.append("low_letter_ratio")
 
@@ -302,18 +377,39 @@ def get_quality_flags(text: str, detected_language: str) -> List[str]:
 # ============================================================
 
 STOP_FOLDERS = {
-    "ворд", "word", "doc", "docx",
-    "сайтга", "сайт", "pdf", "пдф",
-    "нкп", "нкс", "мкп", "мкс",
-    "протокол", "протоколы", "protocol", "protokol",
-    "стандарт", "стандарты", "standard", "standart",
-    "илова", "приложение",
+    "ворд",
+    "word",
+    "doc",
+    "docx",
+    "сайтга",
+    "сайт",
+    "pdf",
+    "пдф",
+    "нкп",
+    "нкс",
+    "мкп",
+    "мкс",
+    "протокол",
+    "протоколы",
+    "protocol",
+    "protokol",
+    "стандарт",
+    "стандарты",
+    "standard",
+    "standart",
+    "илова",
+    "приложение",
 }
 
 REVIEW_MARKERS = [
-    "рецензия", "тақриз", "такриз",
-    "review", "эксперт", "expert",
-    "хулоса", "заключение",
+    "рецензия",
+    "тақриз",
+    "такриз",
+    "review",
+    "эксперт",
+    "expert",
+    "хулоса",
+    "заключение",
 ]
 
 
@@ -338,12 +434,16 @@ def is_supported_file(path: Path) -> bool:
 
 def source_format_from_path(path: Path) -> str:
     ext = path.suffix.lower()
+
     if ext == ".docx":
         return "docx"
+
     if ext == ".doc":
         return "doc"
+
     if ext == ".pdf":
         return "pdf"
+
     return ext.replace(".", "")
 
 
@@ -374,9 +474,11 @@ def get_specialty_and_disease_path(path: Path) -> Tuple[str, str]:
     middle = parts[1:-1] if len(parts) >= 3 else []
 
     disease_parts = []
+
     for part in middle:
         if is_stop_folder(part):
             break
+
         disease_parts.append(clean_part(part))
 
     if not disease_parts:
@@ -396,14 +498,23 @@ def detect_doc_type(path: Path) -> str:
     filename = p.split("/")[-1]
 
     standard_markers = [
-        "стандарт", "standart", "standard",
-        "нкс", "мкс", "mks",
+        "стандарт",
+        "standart",
+        "standard",
+        "нкс",
+        "мкс",
+        "mks",
         "клиник стандарт",
     ]
 
     protocol_markers = [
-        "нкп", "протокол", "protokol", "protocol",
-        "мкп", "mpk", "mkp",
+        "нкп",
+        "протокол",
+        "protokol",
+        "protocol",
+        "мкп",
+        "mpk",
+        "mkp",
         "клиник протокол",
     ]
 
@@ -420,11 +531,30 @@ def normalized_file_key(path: Path) -> str:
     name = path.stem.lower()
 
     remove_words = [
-        "рус", "ру", "russian", "ru",
-        "узб", "кирилл", "кирил", "кир", "cyr",
-        "латин", "лотин", "лот", "latin", "lat",
-        "нкп", "нкс", "мкп", "мкс",
-        "протокол", "стандарт", "protocol", "standard", "protokol", "standart",
+        "рус",
+        "ру",
+        "russian",
+        "ru",
+        "узб",
+        "кирилл",
+        "кирил",
+        "кир",
+        "cyr",
+        "латин",
+        "лотин",
+        "лот",
+        "latin",
+        "lat",
+        "нкп",
+        "нкс",
+        "мкп",
+        "мкс",
+        "протокол",
+        "стандарт",
+        "protocol",
+        "standard",
+        "protokol",
+        "standart",
         "organized",
     ]
 
@@ -483,7 +613,12 @@ def check_command_exists(command: str) -> bool:
     return shutil.which(command) is not None or Path(command).exists()
 
 
-def libreoffice_convert(source_path: Path, target_ext: str, out_dir: Path, timeout: int = 240) -> Path:
+def libreoffice_convert(
+    source_path: Path,
+    target_ext: str,
+    out_dir: Path,
+    timeout: int = 240,
+) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
@@ -499,14 +634,18 @@ def libreoffice_convert(source_path: Path, target_ext: str, out_dir: Path, timeo
     run_cmd(cmd, timeout=timeout)
 
     expected = out_dir / f"{source_path.stem}.{target_ext}"
+
     if expected.exists():
         return expected
 
     matches = list(out_dir.glob(f"{source_path.stem}*.{target_ext}"))
+
     if matches:
         return matches[0]
 
-    raise FileNotFoundError(f"LibreOffice conversion output not found: {source_path} → {target_ext}")
+    raise FileNotFoundError(
+        f"LibreOffice conversion output not found: {source_path} → {target_ext}"
+    )
 
 
 # ============================================================
@@ -516,7 +655,12 @@ def libreoffice_convert(source_path: Path, target_ext: str, out_dir: Path, timeo
 ICD_PATTERN = re.compile(r"\b[A-ZА-Я]\d{2}(?:\.\d{1,2})?\b", re.IGNORECASE)
 
 MKB_MARKERS = [
-    "мкб", "mkb", "icd", "мкх", "код", "code",
+    "мкб",
+    "mkb",
+    "icd",
+    "мкх",
+    "код",
+    "code",
 ]
 
 
@@ -529,6 +673,7 @@ def find_icd_codes(text: str) -> List[str]:
 
     for m in ICD_PATTERN.finditer(text):
         code = m.group(0).upper().replace(",", ".")
+
         if code not in seen:
             codes.append(code)
             seen.add(code)
