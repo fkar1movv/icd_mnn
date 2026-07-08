@@ -12,8 +12,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.common import (
     OUTPUT_DIR,
-    REQUEST_LANGUAGES,
-    FALLBACK_LANGUAGE_PRIORITY,
     clean_text,
     detect_language_from_text,
     ensure_base_dirs,
@@ -22,8 +20,8 @@ from src.common import (
     iter_jsonl,
     write_csv,
     write_json,
+    write_jsonl,
 )
-
 
 RAW_JSONL = OUTPUT_DIR / "parsed_guidelines_raw.jsonl"
 CLEANED_JSONL = OUTPUT_DIR / "parsed_guidelines_cleaned.jsonl"
@@ -31,7 +29,7 @@ CLEANED_JSONL = OUTPUT_DIR / "parsed_guidelines_cleaned.jsonl"
 OUT_REPORT_JSON = OUTPUT_DIR / "extraction_quality_report.json"
 OUT_REPORT_CSV = OUTPUT_DIR / "extraction_quality_report.csv"
 OUT_NEEDS_REVIEW_CSV = OUTPUT_DIR / "needs_review.csv"
-OUT_LANGUAGE_FALLBACK_CSV = OUTPUT_DIR / "language_fallback_after_extraction.csv"
+OUT_VISUAL_REVIEW_CSV = OUTPUT_DIR / "pending_visual_assets_review.csv"
 OUT_DUPLICATES_CSV = OUTPUT_DIR / "possible_duplicate_texts.csv"
 
 
@@ -44,7 +42,6 @@ BAD_TEXT_PATTERNS = [
 
 def load_source_rows(prefer_cleaned: bool = False) -> List[Dict[str, Any]]:
     source = CLEANED_JSONL if prefer_cleaned and CLEANED_JSONL.exists() else RAW_JSONL
-
     rows = list(iter_jsonl(source))
 
     for row in rows:
@@ -58,8 +55,13 @@ def load_source_rows(prefer_cleaned: bool = False) -> List[Dict[str, Any]]:
     return rows
 
 
+def path_exists(path: str) -> bool:
+    return bool(path) and Path(path).exists()
+
+
 def text_hash(text: str) -> str:
     import hashlib
+
     normalized = clean_text(text).lower()
     normalized = re.sub(r"\s+", " ", normalized)
     return hashlib.md5(normalized[:50000].encode("utf-8")).hexdigest()
@@ -72,32 +74,33 @@ def count_bad_patterns(text: str) -> int:
     return count
 
 
-def calc_letter_ratio(text: str) -> float:
+def ratio_count(pattern: str, text: str) -> float:
     if not text:
         return 0.0
-    letters = len(re.findall(r"[A-Za-zА-Яа-яЁёҚқЎўҒғҲҳ]", text))
-    return round(letters / max(len(text), 1), 4)
+    return round(len(re.findall(pattern, text)) / max(len(text), 1), 4)
+
+
+def calc_letter_ratio(text: str) -> float:
+    return ratio_count(r"[A-Za-zА-Яа-яЁёҚқЎўҒғҲҳ]", text)
 
 
 def calc_digit_ratio(text: str) -> float:
-    if not text:
-        return 0.0
-    digits = len(re.findall(r"\d", text))
-    return round(digits / max(len(text), 1), 4)
+    return ratio_count(r"\d", text)
 
 
 def calc_cyrillic_ratio(text: str) -> float:
-    if not text:
-        return 0.0
-    chars = len(re.findall(r"[А-Яа-яЁёҚқЎўҒғҲҳ]", text))
-    return round(chars / max(len(text), 1), 4)
+    return ratio_count(r"[А-Яа-яЁёҚқЎўҒғҲҳ]", text)
 
 
 def calc_latin_ratio(text: str) -> float:
-    if not text:
-        return 0.0
-    chars = len(re.findall(r"[A-Za-z]", text))
-    return round(chars / max(len(text), 1), 4)
+    return ratio_count(r"[A-Za-z]", text)
+
+
+def read_manifest_rows(path: str) -> List[Dict[str, Any]]:
+    p = Path(path or "")
+    if not p.exists():
+        return []
+    return list(iter_jsonl(p))
 
 
 def detect_review_flags(row: Dict[str, Any], min_chars: int) -> List[str]:
@@ -112,6 +115,9 @@ def detect_review_flags(row: Dict[str, Any], min_chars: int) -> List[str]:
     char_count = len(text)
     icd_codes = find_icd_codes(text)
 
+    if row.get("source_format") != "pdf":
+        flags.append("non_pdf_row_in_pdf_only_validation")
+
     if char_count < min_chars:
         flags.append("needs_review_char_count_below_min")
 
@@ -121,36 +127,61 @@ def detect_review_flags(row: Dict[str, Any], min_chars: int) -> List[str]:
     if count_bad_patterns(text) > 0:
         flags.append("needs_review_bad_text_patterns")
 
-    letter_ratio = calc_letter_ratio(text)
-    if char_count > 500 and letter_ratio < 0.25:
+    if char_count > 500 and calc_letter_ratio(text) < 0.25:
         flags.append("needs_review_low_letter_ratio")
 
     if row.get("final_language") == "unknown" or detected_language == "unknown":
         flags.append("needs_review_unknown_language")
 
-    if row.get("extraction_source") == "ocr" and char_count < 1000:
-        flags.append("needs_review_short_ocr_output")
+    # Required extraction artifacts.
+    if not path_exists(row.get("markdown_path")):
+        flags.append("missing_markdown_output")
 
-    if row.get("source_format") == "pdf" and row.get("extraction_source") != "ocr":
-        flags.append("needs_review_pdf_without_ocr")
+    if not path_exists(row.get("agentic_json_path")):
+        flags.append("missing_agentic_json_output")
 
-    # Deduplicate flags preserving order.
+    if not path_exists(row.get("raw_docling_dir")):
+        flags.append("missing_raw_docling_dir")
+
+    # Visual assets.
+    pending_count = int(row.get("pending_visual_count") or 0)
+    manifest_path = row.get("visual_manifest_path")
+
+    if pending_count > 0:
+        flags.append("pending_visual_assets")
+
+        if not path_exists(manifest_path):
+            flags.append("missing_visual_manifest")
+        else:
+            manifest_rows = read_manifest_rows(manifest_path)
+
+            if len(manifest_rows) != pending_count:
+                flags.append("visual_manifest_count_mismatch")
+
+            missing_crops = [m for m in manifest_rows if not path_exists(m.get("crop_path"))]
+            if missing_crops:
+                flags.append("missing_visual_crop_files")
+
+    if int(row.get("docling_batch_failed_count") or 0) > 0:
+        flags.append("docling_batch_failures")
+
+    if int(row.get("page_count") or 0) <= 0:
+        flags.append("missing_page_count")
+
+    # Deduplicate preserving order.
     out = []
     seen = set()
     for f in flags:
         if f not in seen:
             out.append(f)
             seen.add(f)
-
     return out
 
 
 def build_quality_row(row: Dict[str, Any], min_chars: int) -> Dict[str, Any]:
     text = clean_text(row.get("_validation_text") or "")
-
     detected_language = row.get("detected_language") or detect_language_from_text(text)
     final_language = row.get("final_language") or detected_language or row.get("language_hint") or "unknown"
-
     icd_codes = find_icd_codes(text)
     review_flags = detect_review_flags(row, min_chars)
 
@@ -170,6 +201,7 @@ def build_quality_row(row: Dict[str, Any], min_chars: int) -> Dict[str, Any]:
         "final_language": final_language,
         "validation_text_source": row.get("_validation_text_source"),
         "char_count": len(text),
+        "page_count": row.get("page_count"),
         "letter_ratio": calc_letter_ratio(text),
         "digit_ratio": calc_digit_ratio(text),
         "cyrillic_ratio": calc_cyrillic_ratio(text),
@@ -177,84 +209,40 @@ def build_quality_row(row: Dict[str, Any], min_chars: int) -> Dict[str, Any]:
         "icd_code_count": len(icd_codes),
         "icd_codes_detected": ", ".join(icd_codes[:50]),
         "bad_pattern_count": count_bad_patterns(text),
+        "pending_visual_count": row.get("pending_visual_count"),
+        "visual_asset_count": row.get("visual_asset_count"),
+        "docling_batch_count": row.get("docling_batch_count"),
+        "docling_batch_failed_count": row.get("docling_batch_failed_count"),
+        "markdown_path": row.get("markdown_path"),
+        "agentic_json_path": row.get("agentic_json_path"),
+        "raw_docling_dir": row.get("raw_docling_dir"),
+        "visual_manifest_path": row.get("visual_manifest_path"),
         "review_flag_count": len(review_flags),
         "review_flags": "; ".join(review_flags),
         "needs_review": bool(review_flags),
     }
 
 
-def build_fallback_after_extraction(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    grouped = defaultdict(lambda: {
-        "disease_class_id": None,
-        "clinical_doc_group_id": None,
-        "specialty": None,
-        "disease_path": None,
-        "doc_type": None,
-        "variants": defaultdict(list),
-    })
+def collect_visual_review_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out = []
 
     for row in rows:
-        lang = row.get("final_language") or row.get("detected_language") or "unknown"
-        key = (row.get("disease_class_id"), row.get("doc_type"))
-
-        g = grouped[key]
-        g["disease_class_id"] = row.get("disease_class_id")
-        g["clinical_doc_group_id"] = row.get("clinical_doc_group_id")
-        g["specialty"] = row.get("specialty")
-        g["disease_path"] = row.get("disease_path")
-        g["doc_type"] = row.get("doc_type")
-        g["variants"][lang].append(row)
-
-    fallback_rows = []
-
-    for _, group in grouped.items():
-        variants = group["variants"]
-
-        for requested_lang in REQUEST_LANGUAGES:
-            resolved_lang = None
-            resolved_variant = None
-            fallback_type = None
-
-            if requested_lang in variants:
-                resolved_lang = requested_lang
-                resolved_variant = sorted(
-                    variants[requested_lang],
-                    key=lambda x: int(x.get("char_count") or 0),
-                    reverse=True,
-                )[0]
-                fallback_type = "exact"
-            else:
-                for lang in FALLBACK_LANGUAGE_PRIORITY:
-                    if lang in variants:
-                        resolved_lang = lang
-                        resolved_variant = sorted(
-                            variants[lang],
-                            key=lambda x: int(x.get("char_count") or 0),
-                            reverse=True,
-                        )[0]
-                        fallback_type = "fallback"
-                        break
-
-            if not resolved_variant:
-                continue
-
-            fallback_rows.append({
-                "disease_class_id": group["disease_class_id"],
-                "clinical_doc_group_id": group["clinical_doc_group_id"],
-                "specialty": group["specialty"],
-                "disease_path": group["disease_path"],
-                "doc_type": group["doc_type"],
-                "requested_language": requested_lang,
-                "resolved_language": resolved_lang,
-                "fallback_type": fallback_type,
-                "resolved_variant_id": resolved_variant.get("variant_id"),
-                "resolved_source_format": resolved_variant.get("source_format"),
-                "resolved_extraction_source": resolved_variant.get("extraction_source"),
-                "resolved_char_count": resolved_variant.get("char_count"),
-                "resolved_source_path": resolved_variant.get("source_path"),
+        manifest_path = row.get("visual_manifest_path")
+        for item in read_manifest_rows(manifest_path):
+            out.append({
+                "variant_id": row.get("variant_id"),
+                "source_path": row.get("source_path"),
+                "asset_id": item.get("asset_id"),
+                "page": item.get("page"),
+                "order": item.get("order"),
+                "suggested_type": item.get("suggested_type"),
+                "crop_path": item.get("crop_path"),
+                "crop_exists": path_exists(item.get("crop_path")),
+                "status": item.get("status"),
+                "caption": item.get("caption"),
             })
 
-    return fallback_rows
+    return out
 
 
 def find_duplicates(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -299,126 +287,40 @@ def main():
     rows = load_source_rows(prefer_cleaned=args.prefer_cleaned)
 
     if not rows:
-        raise FileNotFoundError(
-            f"No extraction rows found. Expected {RAW_JSONL} or {CLEANED_JSONL}"
-        )
+        raise FileNotFoundError(f"No extraction rows found: {RAW_JSONL}")
 
-    quality_rows = [build_quality_row(row, args.min_chars) for row in rows]
+    quality_rows = [build_quality_row(row, min_chars=args.min_chars) for row in rows]
     needs_review_rows = [r for r in quality_rows if r["needs_review"]]
-    fallback_rows = build_fallback_after_extraction(rows)
     duplicate_rows = find_duplicates(rows)
+    visual_review_rows = collect_visual_review_rows(rows)
 
-    quality_fields = [
-        "variant_id",
-        "disease_class_id",
-        "clinical_doc_group_id",
-        "specialty",
-        "disease_path",
-        "doc_type",
-        "source_path",
-        "source_format",
-        "extraction_source",
-        "extraction_method",
-        "language_hint",
-        "detected_language",
-        "final_language",
-        "validation_text_source",
-        "char_count",
-        "letter_ratio",
-        "digit_ratio",
-        "cyrillic_ratio",
-        "latin_ratio",
-        "icd_code_count",
-        "icd_codes_detected",
-        "bad_pattern_count",
-        "review_flag_count",
-        "review_flags",
-        "needs_review",
-    ]
+    flag_counter = Counter()
+    for row in quality_rows:
+        for f in str(row.get("review_flags") or "").split("; "):
+            if f:
+                flag_counter[f] += 1
 
-    fallback_fields = [
-        "disease_class_id",
-        "clinical_doc_group_id",
-        "specialty",
-        "disease_path",
-        "doc_type",
-        "requested_language",
-        "resolved_language",
-        "fallback_type",
-        "resolved_variant_id",
-        "resolved_source_format",
-        "resolved_extraction_source",
-        "resolved_char_count",
-        "resolved_source_path",
-    ]
-
-    duplicate_fields = [
-        "text_hash",
-        "duplicate_group_size",
-        "variant_id",
-        "source_path",
-        "specialty",
-        "disease_path",
-        "doc_type",
-        "final_language",
-        "char_count",
-    ]
-
-    write_csv(OUT_REPORT_CSV, quality_rows, quality_fields)
-    write_csv(OUT_NEEDS_REVIEW_CSV, needs_review_rows, quality_fields)
-    write_csv(OUT_LANGUAGE_FALLBACK_CSV, fallback_rows, fallback_fields)
-    write_csv(OUT_DUPLICATES_CSV, duplicate_rows, duplicate_fields)
-
-    summary = {
-        "source_file": CLEANED_JSONL.as_posix() if args.prefer_cleaned and CLEANED_JSONL.exists() else RAW_JSONL.as_posix(),
-        "records_total": len(rows),
+    report = {
+        "mode": "pdf_only_agentic_docling_surya",
+        "total_rows": len(quality_rows),
         "needs_review_total": len(needs_review_rows),
-        "needs_review_rate": round(len(needs_review_rows) / max(len(rows), 1), 4),
-        "fallback_rows_total": len(fallback_rows),
-        "possible_duplicate_rows": len(duplicate_rows),
-        "by_source_format": dict(Counter(r["source_format"] for r in quality_rows)),
-        "by_extraction_source": dict(Counter(r["extraction_source"] for r in quality_rows)),
-        "by_doc_type": dict(Counter(r["doc_type"] for r in quality_rows)),
-        "by_final_language": dict(Counter(r["final_language"] for r in quality_rows)),
-        "review_flag_counts": dict(
-            Counter(
-                flag
-                for r in quality_rows
-                for flag in str(r["review_flags"]).split("; ")
-                if flag
-            )
-        ),
-        "icd_code_stats": {
-            "records_with_icd": sum(1 for r in quality_rows if int(r["icd_code_count"]) > 0),
-            "records_without_icd": sum(1 for r in quality_rows if int(r["icd_code_count"]) == 0),
-        },
-        "char_count_stats": {
-            "min": min((int(r["char_count"]) for r in quality_rows), default=0),
-            "max": max((int(r["char_count"]) for r in quality_rows), default=0),
-            "avg": round(
-                sum(int(r["char_count"]) for r in quality_rows) / max(len(quality_rows), 1),
-                2,
-            ),
-        },
-        "outputs": {
-            "quality_report_json": OUT_REPORT_JSON.as_posix(),
-            "quality_report_csv": OUT_REPORT_CSV.as_posix(),
-            "needs_review_csv": OUT_NEEDS_REVIEW_CSV.as_posix(),
-            "language_fallback_after_extraction_csv": OUT_LANGUAGE_FALLBACK_CSV.as_posix(),
-            "possible_duplicates_csv": OUT_DUPLICATES_CSV.as_posix(),
-        },
+        "visual_asset_total": len(visual_review_rows),
+        "total_chars": sum(int(r.get("char_count") or 0) for r in quality_rows),
+        "by_source_format": dict(Counter(r.get("source_format") for r in quality_rows)),
+        "by_extraction_source": dict(Counter(r.get("extraction_source") for r in quality_rows)),
+        "by_detected_language": dict(Counter(r.get("detected_language") for r in quality_rows)),
+        "by_final_language": dict(Counter(r.get("final_language") for r in quality_rows)),
+        "review_flags": dict(flag_counter.most_common()),
+        "duplicate_groups": len(set(r["text_hash"] for r in duplicate_rows)),
     }
 
-    write_json(OUT_REPORT_JSON, summary)
+    write_json(OUT_REPORT_JSON, report)
+    write_csv(OUT_REPORT_CSV, quality_rows)
+    write_csv(OUT_NEEDS_REVIEW_CSV, needs_review_rows)
+    write_csv(OUT_VISUAL_REVIEW_CSV, visual_review_rows)
+    write_csv(OUT_DUPLICATES_CSV, duplicate_rows)
 
-    print("\nDONE")
-    for k, v in summary.items():
-        if k != "outputs":
-            print(f"{k}: {v}")
-
-    print("\nSaved:")
-    for _, v in summary["outputs"].items():
-        print(v)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
