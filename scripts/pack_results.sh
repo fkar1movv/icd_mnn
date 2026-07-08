@@ -5,20 +5,18 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 TS="$(date +%Y%m%d_%H%M%S)"
-PACK_DIR="data/export/icd_inn_extraction_${TS}"
-ZIP_PATH="data/export/icd_inn_extraction_${TS}.zip"
+PACK_DIR="data/export/pdf_agentic_extraction_${TS}"
+ZIP_PATH="data/export/pdf_agentic_extraction_${TS}.zip"
 
 mkdir -p "$PACK_DIR"
-
-echo "Packing extraction results..."
-echo "Export dir: $PACK_DIR"
-
 mkdir -p "$PACK_DIR/outputs"
-mkdir -p "$PACK_DIR/failed"
-mkdir -p "$PACK_DIR/logs"
-mkdir -p "$PACK_DIR/ocr_queue"
-mkdir -p "$PACK_DIR/parsed_word"
 mkdir -p "$PACK_DIR/parsed_docling"
+mkdir -p "$PACK_DIR/parsed_pdf_agentic"
+mkdir -p "$PACK_DIR/parsed_pdf_docling_raw"
+mkdir -p "$PACK_DIR/pdf_visual_assets"
+
+echo "Packing PDF-only extraction outputs..."
+echo "Export dir: $PACK_DIR"
 
 copy_if_exists() {
   local src="$1"
@@ -34,74 +32,51 @@ copy_if_exists() {
 }
 
 # ============================================================
-# Final merged corpus
+# Final extraction JSONL / grouped JSON / validation reports
 # ============================================================
 
 copy_if_exists "data/outputs/parsed_guidelines_raw.jsonl" "$PACK_DIR/outputs/parsed_guidelines_raw.jsonl"
 copy_if_exists "data/outputs/parsed_guidelines_grouped_raw.json" "$PACK_DIR/outputs/parsed_guidelines_grouped_raw.json"
-copy_if_exists "data/outputs/missing_extracted_variants.csv" "$PACK_DIR/outputs/missing_extracted_variants.csv"
 copy_if_exists "data/outputs/merge_outputs_summary.json" "$PACK_DIR/outputs/merge_outputs_summary.json"
 
-# ============================================================
-# Registry
-# ============================================================
-
-copy_if_exists "data/outputs/document_inventory.json" "$PACK_DIR/outputs/document_inventory.json"
-copy_if_exists "data/outputs/document_registry.jsonl" "$PACK_DIR/outputs/document_registry.jsonl"
-copy_if_exists "data/outputs/document_registry_grouped.json" "$PACK_DIR/outputs/document_registry_grouped.json"
-copy_if_exists "data/outputs/document_registry_selected.csv" "$PACK_DIR/outputs/document_registry_selected.csv"
-copy_if_exists "data/outputs/language_fallback_plan.csv" "$PACK_DIR/outputs/language_fallback_plan.csv"
-copy_if_exists "data/outputs/pdf_backfill_candidates.csv" "$PACK_DIR/outputs/pdf_backfill_candidates.csv"
-copy_if_exists "data/outputs/document_registry_summary.json" "$PACK_DIR/outputs/document_registry_summary.json"
-
-# ============================================================
-# Word extraction outputs
-# ============================================================
-
-copy_if_exists "data/outputs/parsed_word.jsonl" "$PACK_DIR/outputs/parsed_word.jsonl"
-copy_if_exists "data/outputs/parsed_word_summary.json" "$PACK_DIR/outputs/parsed_word_summary.json"
-
-# JSON + Markdown Word artifacts.
-copy_if_exists "data/parsed_word" "$PACK_DIR/parsed_word"
-
-# ============================================================
-# Docling + SuryaOCR PDF extraction outputs
-# ============================================================
-
 copy_if_exists "data/outputs/parsed_docling.jsonl" "$PACK_DIR/outputs/parsed_docling.jsonl"
-copy_if_exists "data/outputs/parsed_ocr.jsonl" "$PACK_DIR/outputs/parsed_ocr.jsonl"
 copy_if_exists "data/outputs/parsed_docling_summary.json" "$PACK_DIR/outputs/parsed_docling_summary.json"
 
-# JSON + Markdown Docling artifacts.
+copy_if_exists "data/outputs/pdf_visual_manifest.jsonl" "$PACK_DIR/outputs/pdf_visual_manifest.jsonl"
+copy_if_exists "data/outputs/pdf_visual_manifest.csv" "$PACK_DIR/outputs/pdf_visual_manifest.csv"
+
+copy_if_exists "data/outputs/extraction_quality_report.json" "$PACK_DIR/outputs/extraction_quality_report.json"
+copy_if_exists "data/outputs/extraction_quality_report.csv" "$PACK_DIR/outputs/extraction_quality_report.csv"
+copy_if_exists "data/outputs/needs_review.csv" "$PACK_DIR/outputs/needs_review.csv"
+copy_if_exists "data/outputs/pending_visual_assets_review.csv" "$PACK_DIR/outputs/pending_visual_assets_review.csv"
+copy_if_exists "data/outputs/possible_duplicate_texts.csv" "$PACK_DIR/outputs/possible_duplicate_texts.csv"
+
+# ============================================================
+# Per-PDF extraction artifacts
+# JSON + Markdown only.
+# ============================================================
+
 copy_if_exists "data/parsed_docling" "$PACK_DIR/parsed_docling"
+copy_if_exists "data/parsed_pdf_agentic" "$PACK_DIR/parsed_pdf_agentic"
+copy_if_exists "data/parsed_pdf_docling_raw" "$PACK_DIR/parsed_pdf_docling_raw"
 
 # ============================================================
-# OCR / Docling queue
+# Visual assets: only manifests + complex crops.
+# Do NOT pack rendered full page images.
 # ============================================================
 
-copy_if_exists "data/ocr_queue/ocr_queue.jsonl" "$PACK_DIR/ocr_queue/ocr_queue.jsonl"
-copy_if_exists "data/ocr_queue/ocr_queue.csv" "$PACK_DIR/ocr_queue/ocr_queue.csv"
-copy_if_exists "data/ocr_queue/ocr_queue_summary.json" "$PACK_DIR/ocr_queue/ocr_queue_summary.json"
+if [ -d "data/pdf_visual_assets" ]; then
+  while IFS= read -r -d '' manifest; do
+    rel="${manifest#data/pdf_visual_assets/}"
+    mkdir -p "$(dirname "$PACK_DIR/pdf_visual_assets/$rel")"
+    cp "$manifest" "$PACK_DIR/pdf_visual_assets/$rel"
+  done < <(find data/pdf_visual_assets -name "visual_manifest.jsonl" -print0)
 
-# ============================================================
-# Failure logs
-# ============================================================
-
-copy_if_exists "data/failed/registry_skipped_files.csv" "$PACK_DIR/failed/registry_skipped_files.csv"
-copy_if_exists "data/failed/word_failures.jsonl" "$PACK_DIR/failed/word_failures.jsonl"
-copy_if_exists "data/failed/docling_surya_failures.jsonl" "$PACK_DIR/failed/docling_surya_failures.jsonl"
-copy_if_exists "data/failed/ocr_queue_failures.jsonl" "$PACK_DIR/failed/ocr_queue_failures.jsonl"
-
-# Old compatibility failure files if they exist.
-copy_if_exists "data/failed/ocr_failures.jsonl" "$PACK_DIR/failed/ocr_failures.jsonl"
-copy_if_exists "data/failed/ocr_queue_conversion_failures.jsonl" "$PACK_DIR/failed/ocr_queue_conversion_failures.jsonl"
-
-# ============================================================
-# Logs
-# ============================================================
-
-if [ -d "data/logs" ]; then
-  cp -r data/logs/* "$PACK_DIR/logs/" 2>/dev/null || true
+  while IFS= read -r -d '' cropdir; do
+    rel="${cropdir#data/pdf_visual_assets/}"
+    mkdir -p "$PACK_DIR/pdf_visual_assets/$rel"
+    cp -r "$cropdir"/* "$PACK_DIR/pdf_visual_assets/$rel/" 2>/dev/null || true
+  done < <(find data/pdf_visual_assets -type d -name "crops" -print0)
 fi
 
 # ============================================================
@@ -112,31 +87,30 @@ cat > "$PACK_DIR/export_manifest.json" <<EOF
 {
   "created_at": "$(date -Iseconds)",
   "project_root": "$PROJECT_ROOT",
-  "pipeline": "docling_surya_pdf_and_native_docx_docling_word",
+  "pipeline": "pdf_only_agentic_docling_surya_deferred_vlm",
   "contains_raw_guidelines": false,
-  "contains_parsed_text": true,
+  "contains_word_outputs": false,
+  "contains_pdf_extraction_json": true,
   "contains_markdown": true,
   "contains_docling_json": true,
-  "contains_txt_files": false,
-  "contains_registry": true,
-  "contains_failure_logs": true,
-  "contains_llm_cleanup": false,
-  "contains_mapping": false
+  "contains_rendered_page_images": false,
+  "contains_complex_visual_crops": true,
+  "contains_validation_reports": true,
+  "vlm_status": "deferred"
 }
 EOF
+
+# ============================================================
+# Zip
+# ============================================================
 
 mkdir -p data/export
 
 if command -v zip >/dev/null 2>&1; then
-  cd data/export
-  zip -r "$(basename "$ZIP_PATH")" "$(basename "$PACK_DIR")"
-  cd "$PROJECT_ROOT"
+  (cd "$(dirname "$PACK_DIR")" && zip -qr "$(basename "$ZIP_PATH")" "$(basename "$PACK_DIR")")
+  echo "ZIP created: $ZIP_PATH"
 else
-  tar -czf "${ZIP_PATH%.zip}.tar.gz" -C data/export "$(basename "$PACK_DIR")"
-  ZIP_PATH="${ZIP_PATH%.zip}.tar.gz"
+  echo "zip command not found; folder export is ready: $PACK_DIR"
 fi
 
-echo ""
-echo "DONE"
-echo "Export folder: $PACK_DIR"
-echo "Archive: $ZIP_PATH"
+echo "PACK DONE"
