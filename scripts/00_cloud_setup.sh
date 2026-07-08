@@ -84,6 +84,11 @@ mkdir -p \
   data/failed \
   data/parsed_word \
   data/parsed_docling \
+  data/pdf_work \
+  data/pdf_visual_assets \
+  data/parsed_pdf_agentic \
+  data/parsed_pdf_docling_raw \
+  data/pdf_visual_results \
   data/converted \
   data/ocr_queue \
   data/logs \
@@ -106,6 +111,13 @@ FAILED_DIR=data/failed
 PARSED_WORD_DIR=data/parsed_word
 PARSED_DOCLING_DIR=data/parsed_docling
 PARSED_OCR_DIR=data/parsed_docling
+
+PDF_WORK_DIR=data/pdf_work
+PDF_VISUAL_ASSETS_DIR=data/pdf_visual_assets
+PARSED_PDF_AGENTIC_DIR=data/parsed_pdf_agentic
+PARSED_PDF_DOCLING_RAW_DIR=data/parsed_pdf_docling_raw
+PDF_VISUAL_RESULTS_DIR=data/pdf_visual_results
+
 CONVERTED_DIR=data/converted
 OCR_QUEUE_DIR=data/ocr_queue
 LOG_DIR=data/logs
@@ -118,12 +130,21 @@ CUDA_VISIBLE_DEVICES=0
 OCR_ENGINE=docling_surya
 DOCLING_OCR_LANGS=uz,ru,en
 DOCLING_FORCE_FULL_PAGE_OCR=true
-DOCLING_DO_TABLE_STRUCTURE=false
+DOCLING_DO_TABLE_STRUCTURE=true
 DOCLING_GENERATE_PAGE_IMAGES=false
 DOCLING_GENERATE_PICTURE_IMAGES=false
 DOCLING_IMAGES_SCALE=1.0
 DOCLING_NUM_THREADS=1
 OMP_NUM_THREADS=1
+
+# Agentic PDF extraction
+PDF_BATCH_SIZE=8
+PDF_RENDER_DPI=220
+PDF_CROP_PADDING_PX=12
+PDF_KEEP_PAGE_IMAGES=false
+PDF_KEEP_WORK_DIR=false
+PDF_MIN_CHARS=500
+PDF_DEFER_VLM=true
 
 # Surya runtime
 # On NVIDIA GPU, Surya 2 can use vLLM.
@@ -388,3 +409,16 @@ echo ""
 echo "PDF extraction with Docling + SuryaOCR:"
 echo "  source activate_ocr.sh"
 echo "  python scripts/40_run_docling_surya.py"
+
+
+echo ""
+echo "PDF-only agentic pipeline commands:"
+echo "  source activate_core.sh"
+echo "  python scripts/10_build_registry.py"
+echo "  python scripts/30_build_ocr_queue.py --include-backfill-pdfs"
+echo "  source activate_ocr.sh"
+echo "  python scripts/40_run_doclingocr.py"
+echo "  source activate_core.sh"
+echo "  python scripts/50_merge_outputs.py"
+echo "  python scripts/60_validate_extraction.py"
+echo "  bash scripts/pack_results.sh"
