@@ -40,6 +40,14 @@ PARSED_WORD_DIR = Path(os.getenv("PARSED_WORD_DIR", "data/parsed_word"))
 PARSED_DOCLING_DIR = Path(os.getenv("PARSED_DOCLING_DIR", "data/parsed_docling"))
 PARSED_OCR_DIR = Path(os.getenv("PARSED_OCR_DIR", str(PARSED_DOCLING_DIR)))
 
+# Agentic PDF extraction outputs.
+# These are PDF-only outputs used by scripts/40_run_doclingocr.py.
+PDF_WORK_DIR = Path(os.getenv("PDF_WORK_DIR", "data/pdf_work"))
+PDF_VISUAL_ASSETS_DIR = Path(os.getenv("PDF_VISUAL_ASSETS_DIR", "data/pdf_visual_assets"))
+PARSED_PDF_AGENTIC_DIR = Path(os.getenv("PARSED_PDF_AGENTIC_DIR", "data/parsed_pdf_agentic"))
+PARSED_PDF_DOCLING_RAW_DIR = Path(os.getenv("PARSED_PDF_DOCLING_RAW_DIR", "data/parsed_pdf_docling_raw"))
+PDF_VISUAL_RESULTS_DIR = Path(os.getenv("PDF_VISUAL_RESULTS_DIR", "data/pdf_visual_results"))
+
 CONVERTED_DIR = Path(os.getenv("CONVERTED_DIR", "data/converted"))
 OCR_QUEUE_DIR = Path(os.getenv("OCR_QUEUE_DIR", "data/ocr_queue"))
 LLM_CLEANED_DIR = Path(os.getenv("LLM_CLEANED_DIR", "data/llm_cleaned"))
@@ -64,6 +72,11 @@ def ensure_base_dirs() -> None:
         PARSED_WORD_DIR,
         PARSED_DOCLING_DIR,
         PARSED_OCR_DIR,
+        PDF_WORK_DIR,
+        PDF_VISUAL_ASSETS_DIR,
+        PARSED_PDF_AGENTIC_DIR,
+        PARSED_PDF_DOCLING_RAW_DIR,
+        PDF_VISUAL_RESULTS_DIR,
         CONVERTED_DIR,
         OCR_QUEUE_DIR,
         LLM_CLEANED_DIR,
