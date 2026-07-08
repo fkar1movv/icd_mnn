@@ -47,6 +47,10 @@ def make_docling_pdf_queue_record(row: Dict[str, Any], reason: str) -> Dict[str,
         "original_source_format": row.get("source_format", "pdf"),
         "from_word_conversion": False,
         "converted_pdf_path": None,
+        "pdf_batch_size": 0,
+        "defer_vlm": True,
+        "agentic_json_path": None,
+        "visual_manifest_path": None,
     }
 
 
